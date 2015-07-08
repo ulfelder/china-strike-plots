@@ -140,6 +140,19 @@ plotit.industry <- function(name) {
 
 shinyServer(function(input, output) {
   
+  output$overall <- renderPlot({
+    
+    par(cex.axis=1, mai=c(0.5, 1, 0.1, 1))
+    with(CLB.monthly, plot(total, type = "n", xlab = "", ylab = "", axes = FALSE))
+    axis(2, tick = FALSE, las = 2)
+    abline(h = seq(0, round(max(CLB.monthly$total, -1)), 50), lwd = 0.5,
+           col = alpha("gray50", alpha = 1/2))
+    axis(1, at=seq(1, length(CLB.monthly$total), 12), labels=seq(2011, max(CLB.monthly$year), 1),
+         tick=FALSE, pos=15)
+    with(CLB.monthly, lines(total, col = "gray25", lwd = 2))
+    
+  })
+  
   output$province <- renderPlot({
     
     par(mai=c(0.2, 1.5, 0.1, 0.25), cex.axis=1,

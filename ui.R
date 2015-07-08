@@ -9,12 +9,19 @@ shinyUI(fluidPage(
              ", a Hong Kong-based NGO. The app automatically pulls current data from CLB's",
              a(href="http://maps.clb.org.hk/strikes/en", "strike map"),
              "and then generates sparkline plots of monthly event counts from January 2011 through
-             the most recent complete calendar month by province, by industry, and by strikers' claims."),
+             the most recent complete calendar month overall and by province, by industry, and by
+             strikers' claims."),
            p("This app was built by Jay Ulfelder; it started out as a",
              a(href="http://dartthrowingchimp.wordpress.com/2015/05/31/visualizing-strike-activity-in-china/", "blog post"),
              "on Dart-Throwing Chimp.")
     )
   ),
+  
+  hr(),
+  
+  h3("Overall"),
+  
+  plotOutput("overall", width = "750px", height = "250px"),
   
   hr(),
   
