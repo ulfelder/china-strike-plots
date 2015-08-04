@@ -1,9 +1,10 @@
 library(httr)
 library(readxl)
-library(plyr)
+library(dplyr)
+library(tidyr)
 library(scales)
 
-# Get year and month for last complete month to use in upcoming query
+# Get year and month for last complete month to use in upcoming query; tricky part is dealing with Januarys
 yr <- ifelse(as.numeric(substr(Sys.Date(), 6, 7)) - 1 == 1, 
              as.character(as.numeric(substr(Sys.Date(), 1, 4)) - 1),
              substr(Sys.Date(), 1, 4))
@@ -18,45 +19,29 @@ queryList <- parse_url(baseURL)
 clb <- GET(build_url(queryList), write_disk("clb.temp.xlsx", overwrite=TRUE))
 CLB <- read_excel("clb.temp.xlsx")
 
-# Convert numbers to proper dates and then get year and month as text
-CLB$Date <- as.Date(CLB$Date, format = "%Y-%m-%d", origin = "1899-12-30")
-CLB$year <- as.numeric(substr(as.character(CLB$Date), 1, 4))
-CLB$month <- as.numeric(substr(as.character(CLB$Date), 6, 7))
+# Convert weird date numbers to proper dates and then get year and month as text; I found origin by trial and error
+CLB <- CLB %>%
+    mutate(Date = as.Date(Date, format = "%Y-%m-%d", origin = "1899-12-30"),
+           year =  as.numeric(substr(as.character(Date), 1, 4)),
+           month = as.numeric(substr(as.character(Date), 6, 7)))
 
-# Generate monthly counts by province
-CLB$event <- 1  # Makes summing easy at next step
-CLB.mo.pro <- ddply(CLB, .(year, month, Location), summarise, total = sum(event))
-
-# The resulting df doesn't have rows for cases with no events, but we want to include those
-# and put zeroes there instead. So we make a grid with all province-month combinations, merge
-# the ddply results with it, and replace the NAs with 0s.
-CLB.mo.pro.grid <- expand.grid(Location = unique(CLB$Location),
-                               year = seq(min(CLB$year), max(CLB$year)),
-                               month = seq(1, 12))
-# Cut rows for months that haven't happened and unnamed locations
-CLB.mo.pro.grid <- subset(CLB.mo.pro.grid, (year < as.numeric(yr) |
-  (year == as.numeric(yr) & month <= as.numeric(mo))) & is.na(Location) == FALSE)
-# Merge incomplete data with complete grid
-CLB.mo.pro.2 <- merge(CLB.mo.pro.grid, CLB.mo.pro, all.x=TRUE)
-# Replace NAs with 0s
-CLB.mo.pro.2[is.na(CLB.mo.pro.2)] <- 0
-
-# BY INDUSTRY
-
-CLB.mo.ind <- ddply(CLB, .(year, month, Industry), summarise, total = sum(event))
-
-# The resulting df doesn't have rows for cases with no events, but we want to include those
-# and put zeroes there instead. So we make a grid with all province-month combinations, merge
-# the ddply results with it, and replace the NAs with 0s.
-CLB.mo.ind.grid <- expand.grid(Industry = unique(CLB$Industry),
-                               year = seq(min(CLB$year), max(CLB$year)),
-                               month = seq(1, 12))
-# Cut rows for months that haven't happened and unnamed industries
-CLB.mo.ind.grid <- subset(CLB.mo.ind.grid, (year < as.numeric(yr) | (year == as.numeric(yr) & month <= as.numeric(mo))) & is.na(Industry)==FALSE)
-# Merge
-CLB.mo.ind.2 <- merge(CLB.mo.ind.grid, CLB.mo.ind, all.x=TRUE)
-# Replace NAs with 0s
-CLB.mo.ind.2[is.na(CLB.mo.ind.2)] <- 0
+# Generate monthly counts of events by province
+CLB.mo.pro <- CLB %>%
+    group_by(Location, year, month) %>% # define groups for counting
+    tally() %>% # count events in each group
+    left_join(expand(select(., -n)), .) %>% # merge the tallies with a grid that contains all possible province-year-months
+    filter(., year < as.numeric(yr) | (year == as.numeric(yr) & month <= as.numeric(mo))) %>% # drop rows for months that haven't happened yet
+    filter(., is.na(Location) == FALSE) %>% # drop rows with missing province id
+    mutate(n = replace(n, which(is.na(n)), 0)) # replace NA counts with 0s
+    
+# Generate monthly counts by industry
+CLB.mo.ind <- CLB %>%
+    group_by(Industry, year, month) %>% # define groups for counting
+    tally() %>% # count events in each group
+    left_join(expand(select(., -n)), .) %>% # merge the tallies with a grid that contains all possible province-year-months
+    filter(., year < as.numeric(yr) | (year == as.numeric(yr) & month <= as.numeric(mo))) %>% # drop rows for months that haven't happened yet
+    filter(., is.na(Industry) == FALSE) %>% # drop rows with missing province id
+    mutate(n = replace(n, which(is.na(n)), 0)) # replace NA counts with 0s
 
 # BY CLAIM
 
@@ -69,71 +54,72 @@ CLB.mo.ind.2[is.na(CLB.mo.ind.2)] <- 0
 # a single claim.type variable, but that gets screwy with cases that fit multiple categories. Then this would keep
 # replacing the value sequentially, ultimately only showing the last one checked for in this sequence.
 
-# Start by making a lowercase version of the Demands var to avoid errors of omission from capitalization.
-CLB$demands <- tolower(CLB$Demands)
-# Get list with vectors of comma-separated demand strings for each record
-x <- strsplit(CLB$demands, ",")
-for (i in 1:dim(CLB)[1]) CLB$wage.arrears[i] <- ifelse(isTRUE(grep("wage arrear", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$social.security[i] <- ifelse(isTRUE(grep("social security", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$work.conditions[i] <- ifelse(isTRUE(grep("work conditions", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$pay[i] <- ifelse(isTRUE(grep("pay", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$violence[i] <- ifelse(isTRUE(grep("violence", x[[i]]) > 0) |
-                                                     isTRUE(grep("attack", x[[i]]) > 0) | isTRUE(grep("thug", x[[i]]) > 0) |
-                                                     isTRUE(grep("beat", x[[i]]) > 0) | isTRUE(grep("kill", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$compensation[i] <- ifelse(isTRUE(grep("compensation", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$pension[i] <- ifelse(isTRUE(grep("pension", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$taxi[i] <- ifelse(isTRUE(grep("taxi", x[[i]]) > 0) |
-                                                 isTRUE(grep("cabs", x[[i]]) > 0) | isTRUE(grep("uber", x[[i]]) > 0) |
-                                                 isTRUE(grep("car", x[[i]]) > 0) | isTRUE(grep("rickshaw", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$relocation[i] <- ifelse(isTRUE(grep("relocation", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$corruption[i] <- ifelse(isTRUE(grep("corruption", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$prices[i] <- ifelse(isTRUE(grep("prices", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$overtime[i] <- ifelse(isTRUE(grep("ot", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$layoffs[i] <- ifelse(isTRUE(grep("layoff", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$bonus[i] <- ifelse(isTRUE(grep("bonus", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$merger[i] <- ifelse(isTRUE(grep("merger", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$housing[i] <- ifelse(isTRUE(grep("housing", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$regulation[i] <- ifelse(isTRUE(grep("regulation", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$leave[i] <- ifelse(isTRUE(grep("leave", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$contract[i] <- ifelse(isTRUE(grep("contract", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$housing[i] <- ifelse(isTRUE(grep("housing", x[[i]]) > 0), 1, 0)
-for (i in 1:dim(CLB)[1]) CLB$management[i] <- ifelse(isTRUE(grep("management", x[[i]]) > 0), 1, 0)
+# Get list with vectors of comma-separated, lowercase demand strings for each record
+demands <- strsplit(tolower(CLB$Demands), ",")
 
-# Then use ddply to get monthly sums by various aggregations of these dummies...
-CLB.monthly <- ddply(CLB, .(year, month), summarise,
-                     total = sum(event),
-                     pay = sum(wage.arrears, pay, compensation, bonus, overtime),
-                     conditions = sum(work.conditions, housing, leave), 
-                     layoffs = sum(layoffs),
-                     taxi = sum(taxi), 
-                     welfare = sum(social.security, pension))
+# Now make dummy variables indicating presence of one or more key phrases in each demand field
+CLB$wage.arrears <- sapply(demands, function(x) ifelse(sum(grepl("wage arrear", x)) > 0, 1, 0))
+CLB$social.security <- sapply(demands, function(x) ifelse(sum(grepl("social security", x)) > 0, 1, 0))
+CLB$work.conditions <- sapply(demands, function(x) ifelse(sum(grepl("work conditions", x)) > 0, 1, 0))
+CLB$pay <- sapply(demands, function(x) ifelse(sum(grepl("pay", x)) > 0, 1, 0))
+CLB$compensation <- sapply(demands, function(x) ifelse(sum(grepl("compensation", x)) > 0, 1, 0))
+CLB$pension <- sapply(demands, function(x) ifelse(sum(grepl("pension", x)) > 0, 1, 0))
+CLB$relocation <- sapply(demands, function(x) ifelse(sum(grepl("relocation", x)) > 0, 1, 0))
+CLB$corruption <- sapply(demands, function(x) ifelse(sum(grepl("corruption", x)) > 0, 1, 0))
+CLB$prices <- sapply(demands, function(x) ifelse(sum(grepl("prices", x)) > 0, 1, 0))
+CLB$overtime <- sapply(demands, function(x) ifelse(sum(grepl("ot", x)) > 0, 1, 0))
+CLB$layoffs <- sapply(demands, function(x) ifelse(sum(grepl("layoff", x)) > 0, 1, 0))
+CLB$bonus <- sapply(demands, function(x) ifelse(sum(grepl("bonus", x)) > 0, 1, 0))
+CLB$merger <- sapply(demands, function(x) ifelse(sum(grepl("merger", x)) > 0, 1, 0))
+CLB$housing <- sapply(demands, function(x) ifelse(sum(grepl("housing", x)) > 0, 1, 0))
+CLB$regulation <- sapply(demands, function(x) ifelse(sum(grepl("regulation", x)) > 0, 1, 0))
+CLB$leave <- sapply(demands, function(x) ifelse(sum(grepl("leave", x)) > 0, 1, 0))
+CLB$contract <- sapply(demands, function(x) ifelse(sum(grepl("contract", x)) > 0, 1, 0))
+CLB$management <- sapply(demands, function(x) ifelse(sum(grepl("management", x)) > 0, 1, 0))
+CLB$violence <- sapply(demands,
+    function(x) ifelse(sum(grepl("violence", x)) > 0 | sum(grepl("attack", x)) > 0 | sum(grepl("thug", x)) > 0 |
+        sum(grepl("beat", x)) > 0 | sum(grepl("kill", x)) > 0,
+    1, 0))
+CLB$transport <- sapply(demands,
+    function(x) ifelse(sum(grepl("taxi", x)) > 0 | sum(grepl("cabs", x)) > 0 | sum(grepl("uber", x)) > 0 |
+        sum(grepl("car", x)) > 0 | sum(grepl("rickshaw", x)) > 0,
+    1, 0))
+
+CLB.monthly <- CLB %>%
+    group_by(year, month) %>%
+    summarise(total = n(),
+              pay = sum(wage.arrears, pay, compensation, bonus, overtime),
+              conditions = sum(work.conditions, housing, leave),
+              layoffs = sum(layoffs),
+              transport = sum(transport),
+              welfare = sum(social.security, pension))
 
 # PLOTTING FUNCTIONS
 
 # Function to plot by province
 plotit.province <- function(name) {
-  z <- subset(CLB.mo.pro.2, Location == name)
-  with(z, plot(total, type = "n", xlab = "", ylab = "", ylim=c(0,50), axes=FALSE))
+  z <- subset(CLB.mo.pro, Location == name)
+  with(z, plot(n, type = "n", xlab = "", ylab = "", ylim=c(0,50), axes=FALSE))
   mtext(name, side=2, line=1, las=2, cex=1)
-  segments(x0=rep(1,3), x1=rep(length(z$total),3), y0=seq(0,50,25), y1=seq(0,50,25), 
+  segments(x0=rep(1,3), x1=rep(length(z$n),3), y0=seq(0,50,25), y1=seq(0,50,25), 
            col=alpha("gray50", 0.5), lwd=0.5)
-  with(z, lines(total, col="gray25", lwd = 2))
-  axis(4, at=c(0,25,50), tick=FALSE, pos=length(z$total), las=2)
-  axis(1, at=seq(1, length(z$total), 12), labels=seq(2011, max(z$year), 1), tick=FALSE, pos=5)
+  with(z, lines(n, col="gray25", lwd = 2))
+  axis(4, at=c(0,25,50), tick=FALSE, pos=length(z$n), las=2)
+  axis(1, at=seq(1, length(z$n), 12), labels=seq(2011, max(z$year), 1), tick=FALSE, pos=5)
 }
 
 # Function to plot by industry. The y-axis range is set to accommodate the maximum
 # value for any one industry and is standardized to facilitate comparison across industries.
 plotit.industry <- function(name) {
-  z <- subset(CLB.mo.ind.2, Industry == name)
-  with(z, plot(total, type = "n", xlab = "", ylab = "", ylim=round(range(CLB.mo.ind.2$total), -1),
+  z <- subset(CLB.mo.ind, Industry == name)
+  with(z, plot(n, type = "n", xlab = "", ylab = "", ylim=round(range(CLB.mo.ind$n), -1),
                axes=FALSE))
   mtext(name, side=2, line=1, las=2, cex=1)
-  segments(x0=rep(1,3), x1=rep(length(z$total),3), y0=seq(0,120,60), y1=seq(0,120,60), 
+  segments(x0=rep(1,3), x1=rep(length(z$n),3), y0=seq(0,120,60), y1=seq(0,120,60), 
            col=alpha("gray50", 0.5), lwd=0.5)
-  with(z, lines(total, col="gray25", lwd = 2))
-  axis(4, at=c(0,60,120), tick=FALSE, pos=length(z$total), las=2)
-  axis(1, at=seq(1, length(z$total), 12), labels=seq(2011, max(z$year), 1), tick=FALSE, pos=15)
+  with(z, lines(n, col="gray25", lwd = 2))
+  axis(4, at=c(0,60,120), tick=FALSE, pos=length(z$n), las=2)
+  axis(1, at=seq(1, length(z$n), 12), labels=seq(2011, max(z$year), 1), tick=FALSE, pos=15)
 }
 
 # MAKE STUFF
@@ -156,24 +142,24 @@ shinyServer(function(input, output) {
   output$province <- renderPlot({
     
     par(mai=c(0.2, 1.5, 0.1, 0.25), cex.axis=1,
-        mfrow=c(ceiling(length(unique(CLB.mo.pro.2$Location))/2),2))
-    for (i in 1:length(unique(CLB.mo.pro.2$Location)))
-      plotit.province(as.character(unique(CLB.mo.pro.2$Location)[i]))
+        mfrow=c(ceiling(length(unique(CLB.mo.pro$Location))/2),2))
+    for (i in 1:length(unique(CLB.mo.pro$Location)))
+      plotit.province(as.character(unique(CLB.mo.pro$Location)[i]))
     
   })
   
   output$industry <- renderPlot({
     
     par(mai=c(0.2, 1.5, 0.1, 0.25), cex.axis=1,
-        mfrow=c(ceiling(length(unique(CLB.mo.ind.2$Industry))/2),2))
-    for (i in 1:length(unique(CLB.mo.ind.2$Industry)))
-      plotit.industry(as.character(unique(CLB.mo.ind.2$Industry)[i]))
+        mfrow=c(ceiling(length(unique(CLB.mo.ind$Industry))/2),2))
+    for (i in 1:length(unique(CLB.mo.ind$Industry)))
+      plotit.industry(as.character(unique(CLB.mo.ind$Industry)[i]))
     
   })
   
   output$claim <- renderPlot({
     
-    par(mai=c(0.2, 1.5, 0.1, 0.25), cex.axis=0.8, mfrow=c(2,2))
+    par(mai=c(0.2, 1.5, 0.1, 0.25), cex.axis=0.8, mfrow=c(3,2))
     
     with(CLB.monthly, plot(pay, type = "n", xlab = "", ylab = "", ylim=c(0,260), axes=FALSE))
     mtext("Pay", side=2, line=1, las=2, cex=1)
@@ -210,6 +196,15 @@ shinyServer(function(input, output) {
          tick=FALSE, pos=40)
     with(CLB.monthly, lines(layoffs, col="gray25", lwd = 2))
     axis(4, at=seq(0,200,100), tick=FALSE, pos=length(CLB.monthly$layoffs), las=2)
+    
+    with(CLB.monthly, plot(transport, type = "n", xlab = "", ylab = "", ylim=c(0,260), axes=FALSE))
+    mtext("Transportation", side=2, line=1, las=2, cex=1)
+    segments(x0=rep(1,3), x1=rep(length(CLB.monthly$transport),3), y0=seq(0,200,100), y1=seq(0,200,100), 
+             col=alpha("gray50", 0.5), lwd=0.5)
+    axis(1, at=seq(1, length(CLB.monthly$transport), 12), labels=seq(2011, max(CLB.monthly$year), 1),
+         tick=FALSE, pos=40)
+    with(CLB.monthly, lines(transport, col="gray25", lwd = 2))
+    axis(4, at=seq(0,200,100), tick=FALSE, pos=length(CLB.monthly$transport), las=2)
     
   })
   
